@@ -1,0 +1,25 @@
+services:
+  aggregator:
+    build:
+      context: .
+      dockerfile: cmd/aggregator/Dockerfile
+    ports:
+      - "8080"
+    restart: always
+    networks:
+      - telemetry-network
+  agent:
+    build:
+      context: .
+      dockerfile: cmd/agent/Dockerfile
+    environment:
+      - AGGREGATOR_URL=aggregator:8080
+      - WORKER_COUNT=50
+    restart: always
+    networks:
+      - telemetry-network
+    depends_on:
+      - aggregator
+networks:
+  telemetry-network:
+    driver: bridge

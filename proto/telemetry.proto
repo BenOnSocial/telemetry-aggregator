@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/BenOnSocial/telemetry-aggregator";
+
+package telemetry;
+
+message DataPoint {
+    string machine_id = 1;
+    google.protobuf.Timestamp measured_at = 2;
+    double cpu_usage = 3;
+    double memory_usage = 4;
+    double disk_usage = 5;
+}
