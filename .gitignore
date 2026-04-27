@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+secrets/database_password.txt
+secrets/flyway.toml

@@ -2,18 +2,20 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	telemetry_aggregator "github.com/BenOnSocial/telemetry-aggregator/proto"
 	"github.com/gorilla/websocket"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -21,6 +23,34 @@ var upgrader = websocket.Upgrader{}
 
 func main() {
 	log.SetFlags(0)
+
+	// Root context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Listen for OS signals
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+	// Cancel context on OS signal
+	go func() {
+		<-quit
+		log.Println("Shutting down...")
+		cancel()
+	}()
+
+	// Create shared database connection
+	databasePassword := getSecret("database_password")
+	databaseHost, ok := os.LookupEnv("DATABASE_HOST")
+	databasePort, ok := os.LookupEnv("DATABASE_PORT")
+	databaseUser := "postgres"
+	databaseName, ok := os.LookupEnv("POSTGRES_DB")
+	connString := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", databaseUser, databasePassword, databaseHost, databasePort, databaseName)
+	dbPool, err := pgxpool.New(ctx, connString)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer dbPool.Close()
 
 	workerCount := 50
 	val, ok := os.LookupEnv("WORKER_COUNT")
@@ -37,7 +67,7 @@ func main() {
 
 	for i := 0; i < workerCount; i++ {
 		waitGroup.Add(1)
-		go worker(dataChannel, &waitGroup)
+		go worker(ctx, dataChannel, &waitGroup, dbPool)
 	}
 
 	log.Printf("Started %d workers\n", workerCount)
@@ -55,15 +85,11 @@ func main() {
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
 
 	log.Println("Shutting down aggregator...")
 
-	context, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	server.Shutdown(context)
+	server.Shutdown(ctx)
 
 	close(dataChannel)
 	waitGroup.Wait()
@@ -71,18 +97,36 @@ func main() {
 	log.Println("All workers stopped. Aggregator exited cleanly.")
 }
 
-func worker(dataChan <-chan []byte, waitGroup *sync.WaitGroup) {
+func worker(ctx context.Context, dataChan <-chan []byte, waitGroup *sync.WaitGroup, dbPool *pgxpool.Pool) {
 	defer waitGroup.Done()
 
-	for payload := range dataChan {
-		dataPoint := &telemetry_aggregator.DataPoint{}
-		err := proto.Unmarshal(payload, dataPoint)
-		if err != nil {
-			log.Println("Unmarshal error:", err)
-			continue
-		}
+	query := `INSERT INTO telemetry (machine_id, measured_at, cpu_usage, memory_usage, disk_usage) VALUES ($1, $2, $3, $4, $5)`
 
-		log.Printf("%s", dataPoint.String())
+	for {
+		select {
+		case <-ctx.Done():
+			// Return out of the worker when main() calls cancel()
+			return
+		case payload, ok := <-dataChan:
+			if !ok {
+				// Channel was closed
+				return
+			}
+
+			dataPoint := &telemetry_aggregator.DataPoint{}
+			err := proto.Unmarshal(payload, dataPoint)
+			if err != nil {
+				log.Println("Unmarshal error:", err)
+				continue
+			}
+
+			_, err = dbPool.Exec(ctx, query, dataPoint.MachineId, dataPoint.MeasuredAt.AsTime(), dataPoint.CpuUsage, dataPoint.MemoryUsage, dataPoint.DiskUsage)
+			if err != nil {
+				log.Printf("Insert failed: %v", err)
+			}
+
+			// log.Printf("Data point inserted: %s", dataPoint.String())
+		}
 	}
 }
 
@@ -105,4 +149,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, dataChan chan<- []b
 			dataChan <- p
 		}
 	}
+}
+
+func getSecret(secretName string) string {
+	data, err := os.ReadFile(fmt.Sprintf("/run/secrets/%s", secretName))
+	if err != nil {
+		log.Fatalf("Failed to read secret: %s", secretName)
+	}
+
+	return strings.TrimSpace(string(data))
 }
