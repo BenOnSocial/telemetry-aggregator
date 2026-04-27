@@ -42,6 +42,13 @@ A real-time distributed system designed to stream, aggregate, and process hardwa
 - Docker
 - Docker Compose
 
+### Configuration
+
+This project requires a local secret file to provision the database.
+
+- Copy `secrets/database_password.txt.example` to `secrets/database_password.txt` and set your preferred database password before running `docker-compose up`.
+- Copy `secrets/flyway.toml.example` to ``secrets/flyway.toml` and set your preferred database password from `secrets/database_password.txt` before running `docker-compose up`.
+
 ### Running the Cluster
 
 Spin up the Aggregator server and a sample Agent node using Docker Compose:
