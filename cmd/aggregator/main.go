@@ -11,15 +11,43 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	telemetry_aggregator "github.com/BenOnSocial/telemetry-aggregator/proto"
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/proto"
 )
 
 var upgrader = websocket.Upgrader{}
+
+const PRUNE_AND_ADD_SCRIPT = `
+-- KEYS[1] = "telemetry:machine:[machine_id]"
+-- ARGV[1] = "now" (current timestamp)
+-- ARGV[2] = "window_seconds" (e.g., 1800 for 30 minutes)
+-- ARGV[3] = "payload" (the serialized protobuf bytes)
+
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local payload = ARGV[3]
+
+-- 1. Remove points older than the window
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+
+-- 2. Add the new point (using the timestamp as the score)
+redis.call('ZADD', key, now, payload)
+
+-- 3. Set a global TTL on the key so we don't leak memory for abandoned kiosks
+redis.call('EXPIRE', key, window)
+
+return 1
+`
+
+var telemetryScript = redis.NewScript(PRUNE_AND_ADD_SCRIPT)
 
 func main() {
 	log.SetFlags(0)
@@ -38,6 +66,15 @@ func main() {
 		log.Println("Shutting down...")
 		cancel()
 	}()
+
+	// Create shared cache connection
+	cacheAddress, _ := os.LookupEnv("CACHE_ADDRESS")
+	cache := redis.NewClient(&redis.Options{
+		Addr:     cacheAddress,
+		Password: "", // no password
+		DB:       0,  // use default DB
+		Protocol: 2,
+	})
 
 	// Create shared database connection
 	databasePassword := getSecret("database_password")
@@ -67,7 +104,7 @@ func main() {
 
 	for i := 0; i < workerCount; i++ {
 		waitGroup.Add(1)
-		go worker(ctx, dataChannel, &waitGroup, dbPool)
+		go worker(ctx, dataChannel, &waitGroup, cache, dbPool)
 	}
 
 	log.Printf("Started %d workers\n", workerCount)
@@ -97,16 +134,44 @@ func main() {
 	log.Println("All workers stopped. Aggregator exited cleanly.")
 }
 
-func worker(ctx context.Context, dataChan <-chan []byte, waitGroup *sync.WaitGroup, dbPool *pgxpool.Pool) {
+func worker(ctx context.Context, dataChan <-chan []byte, waitGroup *sync.WaitGroup, cache *redis.Client, dbPool *pgxpool.Pool) {
 	defer waitGroup.Done()
 
-	query := `INSERT INTO telemetry (machine_id, measured_at, cpu_usage, memory_usage, disk_usage) VALUES ($1, $2, $3, $4, $5)`
+	batchSize := 500
+	val, ok := os.LookupEnv("DATABASE_COPY_BATCH_SIZE")
+	if ok {
+		parsed, err := strconv.Atoi(val)
+		if err == nil {
+			batchSize = parsed
+		}
+	}
+	timeoutSeconds := 30
+	val, ok = os.LookupEnv("DATABASE_COPY_BATCH_TIMEOUT")
+	if ok {
+		parsed, err := strconv.Atoi(val)
+		if err == nil {
+			timeoutSeconds = parsed
+		}
+	}
+
+	batch := make([]*telemetry_aggregator.DataPoint, 0, batchSize)
+
+	// Flush the batch to the database, even if it's not full
+	ticker := time.NewTicker(time.Duration(timeoutSeconds) * time.Second)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			flushBatch(ctx, dbPool, batch)
+
 			// Return out of the worker when main() calls cancel()
 			return
+		case <-ticker.C:
+			if len(batch) > 0 {
+				flushBatch(ctx, dbPool, batch)
+				batch = batch[:0]
+			}
 		case payload, ok := <-dataChan:
 			if !ok {
 				// Channel was closed
@@ -114,20 +179,46 @@ func worker(ctx context.Context, dataChan <-chan []byte, waitGroup *sync.WaitGro
 			}
 
 			dataPoint := &telemetry_aggregator.DataPoint{}
-			err := proto.Unmarshal(payload, dataPoint)
-			if err != nil {
-				log.Println("Unmarshal error:", err)
-				continue
-			}
+			proto.Unmarshal(payload, dataPoint)
+			cacheDataPoint(ctx, cache, dataPoint.MachineId, payload)
+			batch = append(batch, dataPoint)
 
-			_, err = dbPool.Exec(ctx, query, dataPoint.MachineId, dataPoint.MeasuredAt.AsTime(), dataPoint.CpuUsage, dataPoint.MemoryUsage, dataPoint.DiskUsage)
-			if err != nil {
-				log.Printf("Insert failed: %v", err)
+			if len(batch) >= batchSize {
+				flushBatch(ctx, dbPool, batch)
+				batch = batch[:0]
 			}
-
-			// log.Printf("Data point inserted: %s", dataPoint.String())
 		}
 	}
+}
+
+func cacheDataPoint(ctx context.Context, cache *redis.Client, machineId string, payload []byte) {
+	now := time.Now().Unix()
+	window := 1800 // 30 minutes
+
+	// Use hash tag around the machine ID to force related telemetry data to land on the same shard.
+	key := fmt.Sprintf("telemetry:machine:{%s}", machineId)
+	_, err := telemetryScript.Run(ctx, cache, []string{key}, now, window, payload).Result()
+	if err != nil {
+		log.Printf("Redis update failed: %v", err)
+	}
+}
+
+func flushBatch(ctx context.Context, dbPool *pgxpool.Pool, batch []*telemetry_aggregator.DataPoint) {
+	_, err := dbPool.CopyFrom(
+		ctx,
+		pgx.Identifier{"telemetry"},
+		[]string{"machine_id", "measured_at", "cpu_usage", "memory_usage", "disk_usage"},
+		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
+			return []any{batch[i].MachineId, batch[i].MeasuredAt.AsTime(), batch[i].CpuUsage, batch[i].MemoryUsage, batch[i].DiskUsage}, nil
+		}),
+	)
+
+	if err != nil {
+		log.Println("Batch insert failed.", err)
+		return
+	}
+
+	log.Printf("Batch insert complete: %d records.", len(batch))
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request, dataChan chan<- []byte) {

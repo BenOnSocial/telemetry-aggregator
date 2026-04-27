@@ -10,16 +10,19 @@ services:
       - telemetry-network
     environment:
       - WORKER_COUNT=50
+      - CACHE_ADDRESS=cache:6379
       - DATABASE_HOST=database
       - DATABASE_PORT=5432
       - POSTGRES_DB=telemetry
+      - DATABASE_COPY_BATCH_SIZE=500  # data points
+      - DATABASE_COPY_BATCH_TIMEOUT=30  # seconds
     secrets:
       - database_password
     depends_on:
       database:
         condition: service_started
-      # cache:
-      #   condition: service_started
+      cache:
+        condition: service_started
       flyway:
         condition: service_completed_successfully
   agent:
@@ -33,12 +36,12 @@ services:
       - telemetry-network
     depends_on:
       - aggregator
-  # cache:
-  #   image: redis:alpine
-  #   networks:
-  #     - telemetry-network
-  #   ports:
-  #     - "6379:6379"
+  cache:
+    image: redis:alpine
+    networks:
+      - telemetry-network
+    ports:
+      - "6379"
   database:
     image: dhi.io/postgres:18-alpine3.22
     secrets:
