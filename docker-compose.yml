@@ -36,12 +36,27 @@ services:
       - telemetry-network
     depends_on:
       - aggregator
+
+  api-server:
+    build:
+      context: .
+      dockerfile: cmd/api-server/Dockerfile
+    ports:
+      - "8081:8081"
+    restart: always
+    networks:
+      - telemetry-network
+    environment:
+      - CACHE_ADDRESS=cache:6379
+    depends_on:
+      - cache
+
   cache:
     image: redis:alpine
     networks:
       - telemetry-network
     ports:
-      - "6379"
+      - "6379:6379"
   database:
     image: dhi.io/postgres:18-alpine3.22
     secrets:

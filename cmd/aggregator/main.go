@@ -26,14 +26,18 @@ var upgrader = websocket.Upgrader{}
 
 const PRUNE_AND_ADD_SCRIPT = `
 -- KEYS[1] = "telemetry:machine:[machine_id]"
+-- KEYS[1] = "registry_key" (global registry key)
 -- ARGV[1] = "now" (current timestamp)
 -- ARGV[2] = "window_seconds" (e.g., 1800 for 30 minutes)
 -- ARGV[3] = "payload" (the serialized protobuf bytes)
+-- ARGV[4] = "machine_id" (the bare machine ID)
 
 local key = KEYS[1]
+local registry_key = KEYS[2]
 local now = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
 local payload = ARGV[3]
+local machine_id = ARGV[4]
 
 -- 1. Remove points older than the window
 redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
@@ -43,6 +47,12 @@ redis.call('ZADD', key, now, payload)
 
 -- 3. Set a global TTL on the key so we don't leak memory for abandoned kiosks
 redis.call('EXPIRE', key, window)
+
+-- 4. Update the global Active Machines registry
+redis.call('ZADD', registry_key, now, machine_id)
+
+-- 5. Prune machines that haven't reported within the window
+redis.call('ZREMRANGEBYSCORE', registry_key, 0, now - window)
 
 return 1
 `
@@ -196,8 +206,9 @@ func cacheDataPoint(ctx context.Context, cache *redis.Client, machineId string, 
 	window := 1800 // 30 minutes
 
 	// Use hash tag around the machine ID to force related telemetry data to land on the same shard.
-	key := fmt.Sprintf("telemetry:machine:{%s}", machineId)
-	_, err := telemetryScript.Run(ctx, cache, []string{key}, now, window, payload).Result()
+	machineKey := fmt.Sprintf("telemetry:machine:{%s}", machineId)
+	machineRegistryKey := "telemetry:active_machines"
+	_, err := telemetryScript.Run(ctx, cache, []string{machineKey, machineRegistryKey}, now, window, payload, machineId).Result()
 	if err != nil {
 		log.Printf("Redis update failed: %v", err)
 	}

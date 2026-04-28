@@ -1,68 +1,81 @@
-# High-Performance Telemetry Aggregator
+# Real-Time Telemetry Aggregator
 
-A real-time distributed system designed to stream, aggregate, and process hardware health metrics (CPU, Memory, Disk) across thousands of remote agents. Built entirely in **Go**, this project demonstrates high-throughput ingestion, bounded concurrency, and efficient binary protocols.
+A distributed system designed for high-frequency hardware telemetry ingestion. Built entirely in **Go**, this project demonstrates a highly concurrent, memory-efficient data pipeline capable of streaming metrics from edge devices to a centralized CQRS architecture.
 
 ## 🚀 Architectural Highlights
 
-- **Binary Streaming Protocol:** Replaced bloated JSON/REST polling with **Protobuf over WebSockets**. This provides a full-duplex, persistent TCP connection with a minimal byte-footprint, drastically reducing network overhead for high-frequency telemetry.
-- **Bounded Concurrency (Backpressure):** The Aggregator server utilizes a **Worker Pool** pattern reading from a buffered channel. This decouples ingestion from processing, ensuring that sudden spikes in telemetry traffic do not exhaust backend database connection pools or CPU resources.
-- **Graceful Lifecycle Management:** Both the Agent and Aggregator strictly monitor OS interrupt signals (`SIGTERM`, `SIGINT`).
-  - The **Agent** utilizes `select` blocks with `time.Ticker` to ensure non-blocking execution and clean socket closure.
-  - The **Aggregator** utilizes `sync.WaitGroup` and Context timeouts to drain the in-memory buffered channels before terminating, guaranteeing zero data loss during deployments.
-- **Production-Ready Containers:** Packaged using multi-stage Docker builds targeting lightweight Alpine images. Binaries are statically compiled (`CGO_ENABLED=0`) and execute under strict non-root user permissions for hardened security.
+- **Binary WebSockets:** Telemetry agents stream metrics using **Protobuf over persistent WebSockets**, bypassing the immense TCP and HTTP header overhead associated with traditional REST polling.
+- **CQRS Implementation:**
+- **Write Path (Cold Storage):** Ingestion is decoupled using a buffered Go channel. A dynamically sized **Worker Pool** pulls from the buffer and executes bulk `COPY` operations into **PostgreSQL** every 30 seconds, protecting the database from IOPS exhaustion.
+- **Read Path (Speed Layer):** Real-time queries are served from a **Redis** cluster.
+- **Atomic Cache Pruning:** The aggregator utilizes a server-side **Lua Script** in Redis to atomically add new telemetry and prune data older than 30 minutes. This guarantees the Speed Layer maintains a strict O(1) memory footprint without requiring a secondary cleanup worker.
+- **Infrastructure as Code:** Fully containerized using multi-stage Alpine images with an orchestrated `docker-compose` lifecycle. Schema management is strictly version-controlled using **Flyway**.
 
 ## 🛠 Tech Stack
 
 - **Language:** Go 1.26
 - **Transport:** WebSockets (`gorilla/websocket`)
 - **Serialization:** Protocol Buffers (Protobuf)
-- **Metrics:** `shirou/gopsutil`
-- **Orchestration:** Docker & Docker Compose
+- **Database (Cold Storage):** PostgreSQL (`pgx` bulk operations) + Flyway
+- **Cache (Speed Layer):** Redis (Sorted Sets + Lua Scripting)
+- **Deployment:** Docker (Multi-stage)
 
 ## 📁 Project Structure
 
 ```text
 ├── cmd/
-│   ├── agent/                 # Telemetry producer (Runs on edge nodes)
-│   │   ├── main.go            # Ticker loop and WebSocket dialer
+│   ├── agent/
+│   │   ├── main.go            # Telemetry producer running on edge nodes. Edge device daemon utilizing `gopsutil` to scrape host CPU/Memory/Disk.
 │   │   └── Dockerfile
-│   └── aggregator/            # Telemetry consumer (Central server)
-│       ├── main.go            # WebSocket upgrader and Worker Pool
-│       └── Dockerfile
+│   ├── aggregator/
+│   │   ├── main.go            # Central telemetry consumer. Ingestion server managing the WebSocket upgrader and PostgreSQL worker pool.
+│   │   └── Dockerfile
+│   └── api-server/
+│   │   ├── main.go            # Lightweight REST API exposing the Redis Speed Layer to frontend consumers.
+│   │   └── Dockerfile
 ├── proto/
-│   ├── telemetry.proto        # Schema definition
-│   └── telemetry.pb.go        # Generated Go structs
-└── docker-compose.yml         # Local cluster orchestration
+│   ├── telemetry.proto        # Protobuf schema definitions.
+│   └── telemetry.pb.go        # Generated Go structs.
+├── schema/                    # Immutable SQL migrations enforced by Flyway on startup.
+│   └── V1__Create_telemetry_table.sql
+├── secrets/                  # Docker secrets storage. (Sample files inside)
+└── docker-compose.yml         # Local cluster orchestration.
 ```
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### 1. Configuring Secrets
 
-- Docker
-- Docker Compose
+Create a secure password file for the database initialization:
 
-### Configuration
+```bash
+echo "your_secure_password" > secrets/database_password.txt
+```
 
-This project requires a local secret file to provision the database.
+You will need to create a `flyway.toml` inside the `secrets` folder to configure the migration URL and credentials. See the example `secrets/flyway.toml.example` file or the [Flyway 10+ TOML configuration documentation](https://www.red-gate.com/hub/product-learning/flyway/getting-started-with-toml-flyway).
 
-- Copy `secrets/database_password.txt.example` to `secrets/database_password.txt` and set your preferred database password before running `docker-compose up`.
-- Copy `secrets/flyway.toml.example` to ``secrets/flyway.toml` and set your preferred database password from `secrets/database_password.txt` before running `docker-compose up`.
-
-### Running the Cluster
-
-Spin up the Aggregator server and a sample Agent node using Docker Compose:
+### 2. Boot the Cluster
 
 ```bash
 docker-compose up --build
 ```
 
-**What happens:**
+\*_This orchestrates the startup sequence:_
 
 1. The **Aggregator** boots on port `8080` and spins up 50 idle background workers.
 2. The **Agent** boots, resolves the aggregator's internal DNS, and establishes a persistent WebSocket connection.
-3. Every 5 seconds, the Agent scrapes the host container's CPU, Memory, and Disk usage, serializes it to Protobuf, and pushes it through the socket.
-4. The Aggregator parses the binary payload and hands it off to the worker pool for processing.
+3. The **API server** boots on port `8081` and listens for machine status requests.
+4. Every 5 seconds, the Agent scrapes the host container's CPU, Memory, and Disk usage, serializes it to Protobuf, and pushes it through the socket.
+5. The Aggregator parses the binary payload and hands it off to the worker pool for processing.
+
+### 3. Query Real-Time Status
+
+To fetch the sub-millisecond latest state of a machine from the Redis Speed Layer:
+
+```bash
+# Check the Agent logs for its unique machine_id
+curl http://localhost:8081/status/<machine_id>
+```
 
 ### Simulating Graceful Shutdown
 
