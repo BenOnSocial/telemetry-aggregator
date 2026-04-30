@@ -11,6 +11,8 @@ A distributed system designed for high-frequency hardware telemetry ingestion. B
 - **Atomic Cache Pruning:** The aggregator utilizes a server-side **Lua Script** in Redis to atomically add new telemetry and prune data older than 30 minutes. This guarantees the Speed Layer maintains a strict O(1) memory footprint without requiring a secondary cleanup worker.
 - **Infrastructure as Code:** Fully containerized using multi-stage Alpine images with an orchestrated `docker-compose` lifecycle. Schema management is strictly version-controlled using **Flyway**.
 
+![Architecture diagram of the telemetry aggregator system.](img/telemetry_aggregator_architecture.png.png)
+
 ## 🛠 Tech Stack
 
 - **Language:** Go 1.26
