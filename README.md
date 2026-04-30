@@ -127,14 +127,18 @@ docker-compose up --build
 To fetch a list of active machines from the Redis Speed Layer:
 
 ```bash
-curl -k http://localhost:443/machines
+curl -k https://localhost:443/machines
+
+{"active_machines":["cd7f4c2529ba","24969196194c","1931c5171419","f29d18770fad","0d21a1cb6889"],"count":5}
 ```
 
 To fetch the sub-millisecond latest state of a machine from the Redis Speed Layer:
 
 ```bash
 # Check the Agent logs for its unique machine_id
-curl -k https://localhost:443/status/<machine_id>
+curl -k https://localhost:443/status/24969196194c
+
+{"machine_id":"24969196194c", "measured_at":"2026-04-30T22:25:08.178389472Z", "cpu_usage":0.33361134278535104, "memory_usage":13.150587185967, "disk_usage":2.737032166903607}
 ```
 
 ### Simulating Graceful Shutdown
