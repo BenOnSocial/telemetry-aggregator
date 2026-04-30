@@ -36,3 +36,4 @@ secrets/flyway.toml
 certs/
 *.crt
 *.key
+node_modules
