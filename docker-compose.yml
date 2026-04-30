@@ -32,7 +32,7 @@ services:
     deploy:
       replicas: 5
     environment:
-      - AGGREGATOR_ADDR=nginx:80
+      - AGGREGATOR_ADDR=aggregator:8080
     restart: always
     networks:
       - telemetry-network
@@ -55,9 +55,10 @@ services:
   nginx:
     image: nginx:alpine
     ports:
-      - "80:80"
+      - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
     depends_on:
       - aggregator
       - api-server

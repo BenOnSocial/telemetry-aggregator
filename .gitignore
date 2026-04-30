@@ -33,3 +33,6 @@ go.work.sum
 
 secrets/database_password.txt
 secrets/flyway.toml
+certs/
+*.crt
+*.key
